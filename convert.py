@@ -93,15 +93,15 @@ def rename_file(mp4_file: Path):
       "meeting-room-23.mp4"  → "meeting-room.mp4"
     """
     patterns = [
-        r'\w+-\d+',        # word-number
-        r'\w+-\w+-\d+'     # word-word-number
+        r'\w+-\d+',        
+        r'\w+-\w+-\d+'     
     ]
 
     base_name = None
     for pattern in patterns:
         match = re.match(pattern, mp4_file.stem)
         if match:
-            base_name = match.group(0)  # group 1 contains the part we want
+            base_name = match.group(0)  # group 0 contains the part we want
             break
 
     if base_name:
