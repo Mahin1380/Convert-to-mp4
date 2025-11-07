@@ -1,2 +1,2 @@
 # Convert-to-mp4
-Convert to file to mp4
+Convert .ts file to file to .mp4
