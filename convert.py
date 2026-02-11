@@ -1,37 +1,86 @@
 from pathlib import Path
-import os
 import re
 import time
-from threading import Thread
+from shutil import move
 from concurrent.futures import ThreadPoolExecutor
 from rich import print
+from better_ffmpeg_progress import FfmpegProcess , FfmpegProcessError
 from send2trash import send2trash
-from better_ffmpeg_progress import FfmpegProcess, FfmpegProcessError
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-source_folder = Path(r"C:\Users\Mahin\Downloads\Video")
+source_folder = Path(r"E:\Video")
+MAX_WORKERS = 4
 
-paths = [
-    source_folder,
-    Path(r"C:\Users\Mahin\code\Python Files"),
-    Path(r"C:\Users\Mahin\OneDrive\Desktop"),
-    Path(r"C:\Users\Mahin\code"),
-    Path(r"E:\Video"),
-]
+ts_files = list(source_folder.glob("*.ts"))
 
-max_workers = 4
+log_folders = [
+
+                Path(r"C:\Users\Mahin\OneDrive\Desktop"),
+                Path(r"C:\Users\Mahin\code"),
+    
+                ]
+
+target_folder = Path(r"E:\Output")
+
+def shorten_file_name(ts_file: Path) -> Path:
+    """Shorten filename if it exceeds 150 characters."""
+    original_stem = ts_file.stem
+
+    if len(original_stem) <= 150:
+        return ts_file  # no need to shorten
+
+    try:
+        shortened_stem = original_stem[:150]
+        new_file = ts_file.with_name(shortened_stem + ts_file.suffix)
+        print(f"[yellow]Shortening: {ts_file.name}[/yellow]")
+        ts_file.rename(new_file)
+        print(f"[green]Renamed to: {new_file.name}[/green]")
+        return new_file
+    except Exception as e:
+        print(f"[red]Error shortening filename: {e}[/red]")
+        return ts_file  # return original if failed
+
+def clean_log_txt_files(folders: list[Path]):
+    """Delete all .ts_ffmpeg_log.txt files in the folders."""
+    for folder in folders:
+        for file in folder.glob("*.ts_ffmpeg_log.txt"):
+            try:
+                send2trash(str(file))
+                print(f"[green]Moved {file.name} to Recycle Bin.[/green]")
+            except Exception as e:
+                print(f"[red]Error deleting {file.name}: {e}[/red]")
 
 
-def clean_log_txt_files(folder: Path):
-    """Delete all .ts_ffmpeg_log.txt files in the folder."""
-    for file in folder.glob("*.ts_ffmpeg_log.txt"):
-        try:
-            send2trash(str(file))
-            print(f"[green]Moved {file.name} to Recycle Bin.[/green]")
-        except Exception as e:
-            print(f"[red]Error deleting {file.name}: {e}[/red]")
 
+def convert_to_mp4(ts_file: Path):
+
+    mp4_file = ts_file.with_suffix(".mp4")
+    if mp4_file.exists():
+        print("[yellow]This file already exists[/yellow]")
+        return 
+    
+    cmd = [
+        "ffmpeg",
+        "-y",                 # overwrite
+        "-i", str(ts_file),
+        "-c", "copy",          # NO re-encode (fast)
+        str(mp4_file)
+    ]
+
+
+
+    print(f"[blue]Converting {ts_file.name} to {mp4_file.name}...[/blue]")
+    
+    try:
+        process = FfmpegProcess(cmd)
+        process.run()
+        print(f"[green]Successfully converted {ts_file.name} → {mp4_file.name}[/green]")
+        send2trash(str(ts_file))
+        return mp4_file
+    except FfmpegProcessError as e:
+        print(f"[red]Error converting {ts_file.name}: {e}[/red]")
+        return None
 
 def rename_file(mp4_file: Path):
     """
@@ -43,7 +92,8 @@ def rename_file(mp4_file: Path):
     patterns = [
         r'\w+-\d+',        
         r'\w+-\w+-\d+',
-        r'\w+ \w+ \d+'     
+        r'\w+ \w+ \d+',
+        r'\w+ \d+'     
     ]
 
     base_name = None
@@ -63,7 +113,7 @@ def rename_file(mp4_file: Path):
 
         try:
             mp4_file.rename(new_file)
-            print(f"[green]Renamed {mp4_file.name} → {new_file.name}[/green]")
+            print(f"[green]Renamed {mp4_file.name}[/green] → [orange]{new_file.name}[/orange]")
             return new_file
         except Exception as e:
             print(f"[red]Error renaming {mp4_file.name}: {e}[/red]")
@@ -72,75 +122,46 @@ def rename_file(mp4_file: Path):
         print(f"[blue]No rename needed for {mp4_file.name}[/blue]")
         return mp4_file
 
-
-def convert_to_mp4_file(ts_file: Path):
-    """Convert a single .ts file to .mp4 and move original to Recycle Bin."""
-    mp4_file = ts_file.with_suffix(".mp4")
-    original_stem = ts_file.stem
-
-    if len(original_stem) > 150:
-        try:
-            truncated_stem = original_stem[:150]
-            truncated_ts = ts_file.with_name(truncated_stem + ts_file.suffix)
-            print(f"[yellow]Filename too long, truncating: {ts_file.name}[/yellow]")
-            os.rename(ts_file, truncated_ts)
-            ts_file = truncated_ts
-            print(f"[green]Renamed to: {ts_file.name}[/green]")
-        except Exception as e:
-            print(f"[red]Error truncating filename: {e}[/red]")
-            return
-
-    if mp4_file.exists():
-        print(f"[yellow]Skipping {ts_file.name}, {mp4_file.name} already exists.[/yellow]")
-        return
-
-    cmd = [
-        "ffmpeg", "-y",
-        "-hwaccel", "qsv",
-        "-hwaccel_output_format", "qsv",
-        "-i", str(ts_file),
-        "-c:v", "h264_qsv",
-        "-preset", "faster",
-        "-look_ahead", "0",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-avoid_negative_ts", "make_zero",
-        str(mp4_file),
-    ]
-
-    print(f"[blue]Converting {ts_file.name} to {mp4_file.name}...[/blue]")
+def move_converted_files(mp4_file: Path, target_folder: Path):
+    """Move converted mp4 file to target folder."""
+    target_folder.mkdir(exist_ok=True, parents=True)
+    
+    target_file = target_folder / mp4_file.name
+    
+    if target_file.exists():
+        print(f"[yellow]File already exists in target: {target_file.name}[/yellow]")
+        return target_file
+    
     try:
-        process = FfmpegProcess(cmd)
-        process.run()
-        print(f"[green]Successfully converted {ts_file.name} → {mp4_file.name}[/green]")
-        send2trash(str(ts_file))
-        print(f"[green]Moved {ts_file.name} to Recycle Bin.[/green]")
-        rename_file(mp4_file)
-        time.sleep(1)
-        for path in paths:
-            clean_log_txt_files(path)
-        print("[cyan]Looking for new files...[/cyan]")
-    except FfmpegProcessError as e:
-        print(f"[red]Error converting {ts_file.name}: {e}[/red]")
+        move(str(mp4_file), str(target_file))  # use full paths
+        print(f"[green]Moved {mp4_file.name} → {target_folder}[/green]")
+        return target_file
+    except Exception as e:
+        print(f"[red]Error moving file: {e}[/red]")
+        return mp4_file
 
 
-def convert_existing_ts_files(folder: Path):
-    """Convert all existing .ts files in the folder."""
-    ts_files = list(folder.glob("*.ts"))
-    if not ts_files:
-        print(f"[blue]No .ts files found in {folder}.[/blue]")
+def process_single_file(ts_file: Path):
+    """Process one ts file through full pipeline."""
+
+    shortened_file = shorten_file_name(ts_file)
+    mp4_file = convert_to_mp4(shortened_file)
+    if mp4_file is None:
         return
+    
+    renamed_file = rename_file(mp4_file)
+    move_converted_files(renamed_file, target_folder)
+    time.sleep(1)
+    clean_log_txt_files(log_folders)
+    
 
-    print(f"[bold green]Found {len(ts_files)} .ts files in {folder} to convert.[/bold green]")
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        executor.map(convert_to_mp4_file, ts_files)
 
+class TSFileHandler(FileSystemEventHandler):
 
-class MyHandler(FileSystemEventHandler):
     def __init__(self):
         super().__init__()
         self.processing_files = set()
-
+    
     def on_created(self, event):
         if event.is_directory or not event.src_path.endswith(".ts"):
             return
@@ -151,40 +172,45 @@ class MyHandler(FileSystemEventHandler):
 
         self.processing_files.add(str(ts_file))
         print(f"[cyan]Detected new .ts file: {ts_file}[/cyan]")
-        time.sleep(0.5)
+        time.sleep(1)
 
-        def convert_and_cleanup():
-            try:
-                convert_to_mp4_file(ts_file)
-            finally:
-                self.processing_files.discard(str(ts_file))
+        try:
+            process_single_file(ts_file)
+        finally:
+            self.processing_files.discard(str(ts_file))
 
-        Thread(target=convert_and_cleanup, daemon=True).start()
-
-
-if __name__ == "__main__":
-    for path in paths:
-        if path.exists():
-            convert_existing_ts_files(path)
-
-    event_handler = MyHandler()
+def main():
+    # check if source folder exists
+    if not source_folder.exists():
+        print(f"[red]Source folder doesn't exist: {source_folder}[/red]")
+        return
+    
+    # process existing files first
+    if ts_files:
+        print(f"[bold green]Processing {len(ts_files)} existing files...[/bold green]")
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            executor.map(process_single_file, ts_files)
+        print("[green]Finished processing existing files![/green]")
+       
+    else:
+        print("[blue]No existing .ts files found.[/blue]")
+        
+    # start watching
+    print(f"[bold cyan]Now monitoring {source_folder} for new .ts files...[/bold cyan]")
+    event_handler = TSFileHandler()
     observer = Observer()
-
-    for path in paths:
-        if path.exists():
-            observer.schedule(event_handler, str(path), recursive=False)
-            print(f"[green]Monitoring: {path}[/green]")
-        else:
-            print(f"[yellow]Skipping non-existent path: {path}[/yellow]")
-
+    observer.schedule(event_handler, str(source_folder), recursive=False)
     observer.start()
-    print("[green]Watching for new .ts files...[/green]")
-    print("[yellow]Press Ctrl+C to stop.[/yellow]")
+    print("[yellow]Press Ctrl+C to stop...[/yellow]")
 
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\n[yellow]Stopping monitoring...[/yellow]")
+        print("\n[yellow]Stopping...[/yellow]")
         observer.stop()
         observer.join()
+        print("[green]Stopped! ✨[/green]")
+
+if __name__ == "__main__":
+    main()
