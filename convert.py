@@ -9,11 +9,14 @@ from send2trash import send2trash
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
-source_folder = Path(r"E:\Video")
+source_folders = [
+                    Path(r"E:\Video"),
+                    Path(r"F:\Movies")
+                
+                ]
 MAX_WORKERS = 4
 
-ts_files = list(source_folder.glob("*.ts"))
-
+ts_files = [file for folder in source_folders for file in folder.glob("*.ts")]
 log_folders = [
 
                 Path(r"C:\Users\Mahin\OneDrive\Desktop"),
@@ -181,9 +184,10 @@ class TSFileHandler(FileSystemEventHandler):
 
 def main():
     # check if source folder exists
-    if not source_folder.exists():
-        print(f"[red]Source folder doesn't exist: {source_folder}[/red]")
-        return
+    for folder in source_folders:
+        if not folder.exists():
+            print(f"[red]Source folder doesn't exist: {folder}[/red]")
+            return
     
     # process existing files first
     if ts_files:
@@ -196,11 +200,12 @@ def main():
         print("[blue]No existing .ts files found.[/blue]")
         
     # start watching
-    print(f"[bold cyan]Now monitoring {source_folder} for new .ts files...[/bold cyan]")
-    event_handler = TSFileHandler()
-    observer = Observer()
-    observer.schedule(event_handler, str(source_folder), recursive=False)
-    observer.start()
+    for folder in source_folders:
+        print(f"[bold cyan]Now monitoring {folder} for new .ts files...[/bold cyan]")
+        event_handler = TSFileHandler()
+        observer = Observer()
+        observer.schedule(event_handler, str(folder), recursive=False)
+        observer.start()
     print("[yellow]Press Ctrl+C to stop...[/yellow]")
 
     try:
