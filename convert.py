@@ -1,37 +1,38 @@
 from pathlib import Path
+from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, TimeElapsedColumn
 import re
 import time
 from shutil import move
 from concurrent.futures import ThreadPoolExecutor
 from rich import print
-from better_ffmpeg_progress import FfmpegProcess , FfmpegProcessError
+from better_ffmpeg_progress import FfmpegProcess
 from send2trash import send2trash
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+import subprocess
+import ffmpeg  # pip install ffmpeg-python
 
 source_folders = [
-                    Path(r"E:\Video"),
-                    Path(r"F:\Movies")
-                
-                ]
+    Path(r"E:\Video"),
+    Path(r"F:\Movies")
+]
+
 MAX_WORKERS = 4
 
-ts_files = [file for folder in source_folders for file in folder.glob("*.ts")]
 log_folders = [
-
-                Path(r"C:\Users\Mahin\OneDrive\Desktop"),
-                Path(r"C:\Users\Mahin\code"),
-    
-                ]
+    Path(r"C:\Users\Mahin\OneDrive\Desktop"),
+    Path(r"C:\Users\Mahin\code"),
+]
 
 target_folder = Path(r"E:\Output")
 
-def shorten_file_name(ts_file: Path) -> Path:
-    """Shorten filename if it exceeds 150 characters."""
-    original_stem = ts_file.stem
+hb_path = r"C:\Users\Mahin\Downloads\Compressed\HandBrakeCLI-1.11.2-win-x86_64\HandBrakeCLI.exe"
 
+
+def shorten_file_name(ts_file: Path) -> Path:
+    original_stem = ts_file.stem
     if len(original_stem) <= 150:
-        return ts_file  # no need to shorten
+        return ts_file
 
     try:
         shortened_stem = original_stem[:150]
@@ -42,10 +43,19 @@ def shorten_file_name(ts_file: Path) -> Path:
         return new_file
     except Exception as e:
         print(f"[red]Error shortening filename: {e}[/red]")
-        return ts_file  # return original if failed
+        return ts_file
+
+
+def get_video_duration(file_path: Path) -> float:
+    """Get duration in seconds using ffmpeg-python"""
+    try:
+        metadata = ffmpeg.probe(str(file_path))
+        return float(metadata['format']['duration'])
+    except Exception:
+        return 0.0
+
 
 def clean_log_txt_files(folders: list[Path]):
-    """Delete all .ts_ffmpeg_log.txt files in the folders."""
     for folder in folders:
         for file in folder.glob("*.ts_ffmpeg_log.txt"):
             try:
@@ -55,109 +65,153 @@ def clean_log_txt_files(folders: list[Path]):
                 print(f"[red]Error deleting {file.name}: {e}[/red]")
 
 
-
 def convert_to_mp4(ts_file: Path):
-
     mp4_file = ts_file.with_suffix(".mp4")
     if mp4_file.exists():
-        print("[yellow]This file already exists[/yellow]")
-        return 
-    
-    cmd = [
+        print("[yellow]MP4 already exists[/yellow]")
+        return mp4_file
+
+    original_duration = get_video_duration(ts_file)
+    print(f"[blue]Processing {ts_file.name}...[/blue]")
+
+    # 1. Try fast FFmpeg first
+    try:
+        cmd = [
         "ffmpeg",
         "-y",                 # overwrite
         "-i", str(ts_file),
         "-c", "copy",          # NO re-encode (fast)
         str(mp4_file)
     ]
-
-
-
-    print(f"[blue]Converting {ts_file.name} to {mp4_file.name}...[/blue]")
-    
-    try:
         process = FfmpegProcess(cmd)
         process.run()
-        print(f"[green]Successfully converted {ts_file.name} → {mp4_file.name}[/green]")
-        send2trash(str(ts_file))
-        return mp4_file
-    except FfmpegProcessError as e:
-        print(f"[red]Error converting {ts_file.name}: {e}[/red]")
-        return None
 
-def rename_file(mp4_file: Path):
-    """
-    Rename an .mp4 file if its stem matches the regex pattern.
-    Examples:
-      "recording-01.mp4"     → "recording.mp4"
-      "meeting-room-23.mp4"  → "meeting-room.mp4"
-    """
-    patterns = [
-        r'\w+-\d+',        
-        r'\w+-\w+-\d+',
-        r'\w+ \w+ \d+',
-        r'\w+ \d+'     
+        new_duration = get_video_duration(mp4_file)
+        if abs(original_duration - new_duration) < 10:
+            print("[green]✅ Fast FFmpeg copy successful[/green]")
+            send2trash(str(ts_file))
+            return mp4_file
+    except Exception:
+        pass
+
+    # 2. HandBrake with Rich Progress Bar
+    print("[blue]Starting HandBrake (this may take a while)...[/blue]")
+
+    hb_cmd = [
+        hb_path,
+        "--input", str(ts_file),
+        "--output", str(mp4_file),
+        "--preset", "Very Fast 1080p30",
+        "--quality", "22",
+        "--encoder", "x264",
+        "--optimize",
+        "--all-audio",
+        "--aencoder", "aac",
+        "--ab", "160"
     ]
 
+    progress_pattern = re.compile(r'(\d+\.\d+)\s*%')
+
+    try:
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TextColumn("{task.percentage:>5.1f}%"),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+            refresh_per_second=10,
+        ) as progress:
+
+            task = progress.add_task(
+                f"Encoding {ts_file.name}",
+                total=100
+            )
+
+            process = subprocess.Popen(
+                hb_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1
+            )
+
+            for line in process.stdout:
+                match = progress_pattern.search(line)
+                if match:
+                    percent = float(match.group(1))
+                    progress.update(task, completed=percent)
+
+            process.wait()
+            progress.update(task, completed=100)
+
+            if process.returncode == 0 and mp4_file.exists():
+                print("[green]✅ HandBrake conversion finished successfully[/green]")
+                send2trash(str(ts_file))
+                return mp4_file
+            else:
+                print(f"[red]HandBrake failed with code {process.returncode}[/red]")
+                return None
+
+    except Exception as e:
+        print(f"[red]Error during HandBrake: {e}[/red]")
+        return None
+
+
+def rename_file(mp4_file: Path):
+    patterns = [r'\w+-\w+-\d+', r'\w+ \w+ \d+', r'\w+-\d+', r'\w+ \d+']
     base_name = None
     for pattern in patterns:
-        match = re.match(pattern, mp4_file.stem)
+        match = re.findall(pattern, mp4_file.stem)
         if match:
-            base_name = match.group(0)  # group 0 contains the part we want
+            base_name = match[0]
             break
 
     if base_name:
         cleaned_name = base_name + mp4_file.suffix
         new_file = mp4_file.with_name(cleaned_name)
-
         if new_file.exists():
             print(f"[yellow]Skipping rename: {new_file.name} already exists.[/yellow]")
             return mp4_file
-
         try:
             mp4_file.rename(new_file)
-            print(f"[green]Renamed {mp4_file.name}[/green] → [orange]{new_file.name}[/orange]")
+            print(f"[green]Renamed {mp4_file.name} → {new_file.name}[/green]")
             return new_file
         except Exception as e:
-            print(f"[red]Error renaming {mp4_file.name}: {e}[/red]")
+            print(f"[red]Rename error: {e}[/red]")
             return mp4_file
-    else:
-        print(f"[blue]No rename needed for {mp4_file.name}[/blue]")
-        return mp4_file
+    return mp4_file
+
 
 def move_converted_files(mp4_file: Path, target_folder: Path):
-    """Move converted mp4 file to target folder."""
     target_folder.mkdir(exist_ok=True, parents=True)
-    
     target_file = target_folder / mp4_file.name
-    
+
     if target_file.exists():
-        print(f"[yellow]File already exists in target: {target_file.name}[/yellow]")
+        print(f"[yellow]Target file already exists: {target_file.name}[/yellow]")
         return target_file
-    
+
     try:
-        move(str(mp4_file), str(target_file))  # use full paths
-        print(f"[green]Moved {mp4_file.name} → {target_folder}[/green]")
+        move(str(mp4_file), str(target_file))
+        print(f"[green]Moved → {target_folder}[/green]")
         return target_file
     except Exception as e:
-        print(f"[red]Error moving file: {e}[/red]")
+        print(f"[red]Move error: {e}[/red]")
         return mp4_file
 
 
 def process_single_file(ts_file: Path):
-    """Process one ts file through full pipeline."""
-
     shortened_file = shorten_file_name(ts_file)
     mp4_file = convert_to_mp4(shortened_file)
     if mp4_file is None:
         return
-    
+
     renamed_file = rename_file(mp4_file)
     move_converted_files(renamed_file, target_folder)
     time.sleep(1)
     clean_log_txt_files(log_folders)
-    
 
+
+# ... rest of your code (TSFileHandler, main(), etc.) remains the same ...
 
 class TSFileHandler(FileSystemEventHandler):
 
@@ -183,6 +237,8 @@ class TSFileHandler(FileSystemEventHandler):
             self.processing_files.discard(str(ts_file))
 
 def main():
+    # get video files from source folders
+    ts_files = [file for folder in source_folders for file in folder.glob("*.ts")]
     # check if source folder exists
     for folder in source_folders:
         if not folder.exists():
