@@ -132,6 +132,8 @@ def convert_to_mp4(ts_file: Path):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1
             )
 
@@ -158,7 +160,7 @@ def convert_to_mp4(ts_file: Path):
 
 
 def rename_file(mp4_file: Path):
-    patterns = [r'\w+-\w+-\d+', r'\w+ \w+ \d+', r'\w+-\d+', r'\w+ \d+']
+    patterns = [r'\w+-\w+-\d+', r'\w+ \w+ \d+', r'\w+-\d+', r'\w+ \d+', r'\w+-\d+-\d+']
     base_name = None
     for pattern in patterns:
         match = re.findall(pattern, mp4_file.stem)
